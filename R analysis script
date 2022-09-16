@@ -1,0 +1,464 @@
+
+```{r, echo=F, message=F, warning=F, include=F}
+source("Functions_PHRC_210122.R")
+```
+
+## Data import & log transformation:
+
+37 proteins and 136 patients (3 removed because 2 strains, and 4 removed because NA for Spa (BEC, EON, FIC and KES))
+
+```{r}
+clin <- read.table("Clinic_ssnom_210122.txt", h = T, sep = "\t", dec = ",")
+prot <- fread("Proteo_ssnom_210122.txt", h = T, sep = "\t", dec = ",")
+```
+
+```{r}
+# Log2 transformation
+prot_m_log <- apply(as.matrix(prot), 2, function(x) {
+  y <- log2(x)
+  y[x == 0] <- min(log2(x[x > 0])) - 1
+  return(y)
+})
+
+prot_df_log <- as.data.frame(prot_m_log)
+```
+
+## Link between Spa repeats and quantification
+
+```{r}
+spa <- read.table("Spa_repeats.txt", h = T, sep = "\t", dec = ",")
+Repeats<-as.factor(spa$Repeats.number)
+p1<-ggplot(spa, aes(x=Repeats, y=Spa)) +
+   geom_boxplot() +
+  geom_point(alpha = 0.5, color = "blue") +
+    labs(x = "Spa gene repeats number",
+         y = "Spa log2 semi-quantification") +
+    geom_text(x=1.5, y=0.65, label="cor = 0.017 \n p-value = 0.83 - ns ")
+p1
+save.plot(p1, "Spa_cor_repeats")
+(cor.test(spa$Repeats.number, spa$Spa, method = "pearson"))
+```
+
+
+## ACP with all proteins and all strains:
+
+```{r}
+cols <- c("Death", "PVL", "Lineage", "Rash", "Hemopty", "Leukopenia_Bin")
+clin[cols] <- lapply(as.data.frame(clin)[, names(clin) %in% cols], factor)
+clin <- data.table(clin)
+
+clin[, AGR := factor(AGR)]
+
+
+# ACP (JP)
+pr <- prcomp(prot_m_log)
+
+## AGR
+plot(pr$x[, 1:2], col = as.integer(clin$AGR), pch = 18, xlab = "Dimension 1", ylab = "Dimension 2")
+legend("topright", legend = c("Type I", "Type II", "Type III", "Type IV"), pch= 19, col = c("black", "indianred3", "limegreen", "dodgerblue"))
+abline(h = 0, v = 0)
+
+## CC
+plot(pr$x[,1:2], col = as.integer(clin$Lineage), pch = 19, xlab = "Dimension 1", ylab = "Dimension 2")
+abline(h = 0, v=0)
+
+# ACP (MP)
+pca <- PCA(prot_m_log, ncp = 5, graph = F, scale.unit = T)
+
+## AGR
+g <- ggplotGrob(fviz_eig(pca, ncp = 5, barfill = "cornsilk4", barcolor = "black", title = "Eigenvalue Plot") + theme_minimal())
+gg <- fviz(pca, label = "none", habillage = clin$AGR, element = "ind", geom = "point", pointshape = rep(18,136), pointsize = 2, invisible = "quali", addEllipses = TRUE, ellipse.level = 0.95, legend.title = "AGR Type", title = "PCA accordig to the AGR Type")
+
+#Grouper les 2 graphiques
+(P1 <- ggarrange(gg, g, labels = c("A","B"), ncol = 2, nrow = 1,  align = "hv", widths = c(2.75, 1.25), common.legend = FALSE))
+
+save.plot(P1, "ACP_AGR")
+
+## CC 
+(PCA_CC <- fviz(pca, label = "none", habillage = clin$Lineage, element = "ind", geom = "point", pointshape = rep(18,136), pointsize = 2, invisible = "quali", addEllipses = TRUE, ellipse.level = 0.95, legend.title = "CC", title = "PCA accordig to the Clonal Complex (CC)"))
+
+save.plot(PCA_CC, "ACP_CC")
+```
+
+## Proteins' correlations
+
+```{r}
+M <- cor(data.table(prot_m_log))
+res_cor_mtest <- cor.mtest(data.table(prot_m_log), conf.level=.95)
+corplot1 <- corrplot(M, method = "circle", type="lower", order="hclust", tl.col="black", tl.srt=45, tl.cex = 0.5, p.mat=res_cor_mtest$p, insig="blank", diag=F, col=c("#000033","#1A237E", "#0066CC","#64B5F6", "#E3F2FD", "#FFEBEE", "#E57373" ,"#D32F2F" ,"#990000", "#660000"))
+```
+
+# Univariate and multivariate analyses:
+
+Remove protein with correlation and part of an operon
+And all analyses include Charlson score
+
+```{r}
+names_prot_to_keep <- setdiff(colnames(prot_df_log), c("LukD", "LukG", "PSMa1", "LukF"))
+prot_df_log_red <- prot_df_log[, colnames(prot_df_log) %in% names_prot_to_keep ]
+d <- as.data.table(cbind(clin, prot_df_log_red))
+```
+
+## Death:
+
+### Charlson impact:
+
+```{r}
+head(coef(summary(glm(Death ~ CHAtot, d, family = "binomial"))))
+```
+
+### PVL as binary and Charlson impacts:
+
+```{r}
+d[, hasPVL := d$PVL == "Pos"]
+
+## Univariate
+
+# only Charlson and PVL bin: 
+head(coef(summary(glm(Death ~ CHAtot + hasPVL, d, family = "binomial"))))
+
+# proteins correlated with death, with Charlson and PVL bin as controls:
+death_pvl_bin <- t(apply(prot_df_log_red, 2, function(prot) {
+  coef(summary(glm(Death ~ prot + CHAtot + hasPVL, d, family = "binomial")))[2,]
+}))
+head(death_pvl_bin[order(death_pvl_bin[, 4]),])
+
+## Multivariate
+# proteins correlated with death, with Charlson and PVL bin as controls:
+cha_pvl<-as.data.frame(cbind(d$CHAtot, d$hasPVL))
+names(cha_pvl)<-c("CHAtot", "hasPVL")
+(multi_death_pvl <- multi_ana_binomial_multi_ctrl(prot_df_log_red, d$Death, cha_pvl))
+
+## Linear regression with only PVL pos strain:
+d1<- d %>%
+    filter(hasPVL=="TRUE")
+head(coef(summary(glm(Death ~ LukS + CHAtot, d1, family = "binomial"))))
+#boxplot:
+p2<-ggplot(d1, aes(x=Death, y=LukS, fill=Death)) +
+  geom_boxplot() +
+  geom_dotplot(binaxis='y', stackdir='center', dotsize=0.8, fill = "lightgray") + 
+  scale_fill_manual(values=c("#E69F00", "#56B4E9")) + 
+  theme(axis.text.x = element_blank(), axis.ticks.x=element_blank(), legend.key.height= unit(1, 'cm'),
+        legend.key.width= unit(1, 'cm')) +
+  xlab("") 
+p2
+save.plot(p2, "LukS_Death_PVLpos")
+```
+
+
+### Univariate:
+
+```{r}
+#association of Charlson and proteomic data
+
+(uni_death <- uni_ana_binomial(prot_df_log_red, d$Death, d$CHAtot))
+
+if (dir.exists("/Users/marianepivard/Desktop/Protéomique Janvier 2022/")) {
+  write_xlsx(uni_death,"/Users/marianepivard/Desktop/Protéomique Janvier 2022/uni_death.xlsx")
+}
+
+boxLabels1 <- rev(c("PBP2A", "TSST1","Sbi","BlaZ","EtD", "PSMa4", "Spa", "LukS", "SspP_V8", "SplB","Nuc", "SEA",  "KatA", "ScpA", "SCIN","Hla", "Sak", "Cna",  "LukH", "HlgA", "IsaB", "SEC", "CHIPS",  "LukE", "HlgB", "GapA", "Fib",  "HlgC","Hld", "BlaI", "EdinB", "SdrD", "SarA"))
+(uni_death_plot <- create.odds.visu(uni_death, boxLabels1))
+
+save.plot(uni_death_plot, "uni_death_plot")
+```
+
+### Multivariate
+
+```{r}
+(multi_death <- multi_ana_binomial(prot_df_log_red, d$Death, d$CHAtot))
+if (dir.exists("/Users/marianepivard/Desktop/Protéomique Janvier 2022/")) {
+  write_xlsx(multi_death,"/Users/marianepivard/Desktop/Protéomique Janvier 2022/multi_death.xlsx")
+}
+
+(multi_death_plot <- create.odds.visu(multi_death$res_order_col_four[ !(multi_death$res_order_col_four$rowname %in% c("(Intercept)", "CHAtot")), ], boxLabels1))
+save.plot(multi_death_plot, "multi_death_plot")
+
+## Creation panels with multi and univariate plots
+
+(uni_death_plot2 <- create.odds.visu2(uni_death, boxLabels1))
+(Pdeath <- ggarrange(multi_death_plot, NULL, uni_death_plot2, ncol = 3, nrow = 1,  align = "hv", widths = c(2, 0.05, 2), common.legend = FALSE))
+
+save.plot(Pdeath, "multi_uni_death_plot")
+```
+
+## Leukopenia
+
+```{r}
+d[, leuko := Leukopenia_Bin == "yes"]
+```
+
+### Univariate:
+
+```{r}
+(uni_leuko <- uni_ana_binomial(prot_df_log_red, d$leuko, d$CHAtot))
+if (dir.exists("/Users/marianepivard/Desktop/Protéomique Janvier 2022/")) {
+  write_xlsx(uni_leuko,"/Users/marianepivard/Desktop/Protéomique Janvier 2022/uni_leuko.xlsx")
+}
+
+boxLabels2 = rev(c( "Nuc", "TSST1",  "HlgB", "SCIN", "Sbi", "SarA", "Fib", "LukH", "SEA",  "EdinB", "Sak", "Hla", "Hld", "Spa",  "SspP_V8", "EtD", "GapA", "PBP2A", "ScpA", "LukS", "SplB", "PSMa4", "BlaZ",  "SdrD", "Cna", "KatA", "HlgC", "LukE", "BlaI",  "CHIPS", "HlgA", "IsaB", "SEC"))
+(uni_leuko_plot <- create.odds.visu(uni_leuko, boxLabels2))
+save.plot(uni_leuko_plot, "uni_leuko_plot")
+```
+
+### Multivariate:
+
+```{r}
+(multi_leuko <- multi_ana_binomial(prot_df_log_red, d$leuko, d$CHAtot))
+if (dir.exists("/Users/marianepivard/Desktop/Protéomique Janvier 2022/")) {
+  write_xlsx(multi_leuko,"/Users/marianepivard/Desktop/Protéomique Janvier 2022/multi_leuko.xlsx")
+}
+
+(multi_leuko_plot <- create.odds.visu(multi_leuko$res_order_col_four[ !(multi_leuko$res_order_col_four$rowname %in% c("(Intercept)", "CHAtot")), ], boxLabels2))
+save.plot(multi_leuko_plot, "multi_leuko_plot")
+
+## Creation panels with multi and univariate plots
+
+(uni_leuko_plot2 <- create.odds.visu2(uni_leuko, boxLabels2))
+(Pleuko <- ggarrange(multi_leuko_plot, uni_leuko_plot2, ncol = 2, nrow = 1,  align = "hv", widths = c(1, 1), common.legend = FALSE))
+
+save.plot(Pleuko, "multi_uni_leuko_plot")
+```
+
+## Hemoptysis:
+
+```{r}
+d[, hemopty := Hemopty == "yes"]
+```
+
+### Univariate:
+```{r}
+(uni_hemo <- uni_ana_binomial(prot_df_log_red, d$hemopty, d$CHAtot))
+if (dir.exists("/Users/marianepivard/Desktop/Protéomique Janvier 2022/")) {
+  write_xlsx(uni_hemo,"/Users/marianepivard/Desktop/Protéomique Janvier 2022/uni_hemo.xlsx")
+}
+
+boxLabels3 = rev(c("KatA", "BlaZ", "Fib", "HlgB", "EdinB", "TSST1", "LukH", "SEA","Hld", "SdrD", "LukS","Nuc", "CHIPS", "EtD", "Hla", "HlgA", "Cna", "IsaB",  "SplB", "SCIN",  "Sak", "LukE", "ScpA", "SspP_V8",  "BlaI",  "HlgC", "Spa", "Sbi", "PSMa4", "SarA", "PBP2A", "GapA", "SEC"))
+(uni_hemo_plot <- create.odds.visu(uni_hemo, boxLabels3))
+save.plot(uni_hemo_plot, "uni_hemo_plot")
+```
+
+### Multivariate:
+
+```{r}
+(multi_hemo <- multi_ana_binomial(prot_df_log_red, d$hemopty, d$CHAtot))
+if (dir.exists("/Users/marianepivard/Desktop/Protéomique Janvier 2022/")) {
+  write_xlsx(multi_hemo,"/Users/marianepivard/Desktop/Protéomique Janvier 2022/multi_hemo.xlsx")
+}
+  
+(multi_hemo_plot <- create.odds.visu(multi_hemo$res_order_col_four[ !(multi_hemo$res_order_col_four$rowname %in% c("(Intercept)", "CHAtot")), ], boxLabels3))
+save.plot(multi_hemo_plot, "multi_hemo_plot")
+
+
+## Creation panels with multi and univariate plots
+
+(uni_hemo_plot2 <- create.odds.visu2(uni_hemo, boxLabels3))
+(Phemo <- ggarrange(multi_hemo_plot, uni_hemo_plot2, ncol = 2, nrow = 1,  align = "hv", widths = c(1, 1), common.legend = FALSE))
+
+save.plot(Phemo, "multi_uni_hemo_plot")
+```
+
+# Univariate and multivariate analysis with sub-groups of proteins
+
+Groups:
+Adhesion: Cna, Fib and SdrD
+Pore-Forming Toxins: Hla, HlgA, HlgC, HlgB, LukE, LukH, LukS, PSMα4 and Hld
+SAg: SEA, SEC and TSST-1
+Proteases: SplB, ScpA, EtD and SspP (V8)
+Neutrophils chemotaxis inhibition: SCIN, CHIPS, Sbi and Spa
+
+```{r}
+groupnames <- data.table(
+	group = c(rep("adhesion", 3), rep("pft", 9), rep("sag", 3), rep("protease", 4), rep("neutro inhi", 4)),
+	name = c("Cna","Fib","SdrD","Hla","HlgA","HlgC","HlgB","LukE","LukH","LukS","PSMa4","Hld","SEA","SEC","TSST1","SplB","ScpA", "EtD", "SspP_V8", "SCIN", "CHIPS", "Sbi", "Spa")
+)
+```
+
+## Death:
+
+```{r}
+(group_death <- multi_ana_subgroups_binomial(prot_df_log_red, d$Death, d$CHAtot, groupnames))
+if (dir.exists("/Users/marianepivard/Desktop/Protéomique Janvier 2022/")) {
+  write_xlsx(group_death$groupcoef,"/Users/marianepivard/Desktop/Protéomique Janvier 2022/group_death.xlsx")
+}
+```
+
+## Leukopenia:
+
+```{r}
+(group_leuko <- multi_ana_subgroups_binomial(prot_df_log_red, d$leuko, d$CHAtot, groupnames))
+if (dir.exists("/Users/marianepivard/Desktop/Protéomique Janvier 2022/")) {
+  write_xlsx(group_leuko$groupcoef,"/Users/marianepivard/Desktop/Protéomique Janvier 2022/group_leuko.xlsx")
+}
+```
+
+## Hemoptysis:
+
+```{r}
+(group_hemo <- multi_ana_subgroups_binomial(prot_df_log_red, d$hemopty, d$CHAtot, groupnames))
+if (dir.exists("/Users/marianepivard/Desktop/Protéomique Janvier 2022/")) {
+  write_xlsx(group_hemo$groupcoef,"/Users/marianepivard/Desktop/Protéomique Janvier 2022/group_hemo.xlsx")
+}
+```
+
+# Survival analysis:
+
+## Control with PVL and MECA
+
+```{r}
+# Some NA's in proteomics are excluded a priori
+d[, pvl_bin := PVL == "Pos"]
+d[, mec_bin := prot$PBP2A > 0]
+d[, dead := Death == "yes"]
+
+# Survival models 
+(surv <- Surv(d$Time_hosp, event = d$dead, type = "right"))
+
+# Inclusion of binary factors for PVL and mecA does not alter conclusions
+(mod4 <- coxph(surv ~ d$CHAtot + d$pvl_bin + d$mec_bin + ., prot_df_log_red))
+(survie_pvlmeca <-as.data.frame(summary(mod4)$coefficients))
+(IC_survie_pvlmeca <- rownames_to_column(as.data.frame(exp(confint(mod4))), var = "rowname"))
+
+
+
+if (dir.exists("/Users/marianepivard/Desktop/Protéomique Janvier 2022/")) {
+  write_xlsx(survie_pvlmeca,"/Users/marianepivard/Desktop/Protéomique Janvier 2022/survie_pvlmeca.xlsx")
+}
+if (dir.exists("/Users/marianepivard/Desktop/Protéomique Janvier 2022/")) {
+  write_xlsx(IC_survie_pvlmeca,"/Users/marianepivard/Desktop/Protéomique Janvier 2022/IC_survie_pvlmeca.xlsx")
+}
+```
+
+## Survival analysis with univariate approach:
+
+```{r}
+(survie_uni_pvl <- uni_mod(prot_df_log_red$LukS, surv, d$CHAtot))
+if (dir.exists("/Users/marianepivard/Desktop/Protéomique Janvier 2022/")) {
+  write_xlsx(survie_uni_pvl$coxph_ci,"/Users/marianepivard/Desktop/Protéomique Janvier 2022/survie_uni_pvl.xlsx")
+}
+
+(survie_uni_psm <- uni_mod(prot_df_log_red$PSMa4, surv, d$CHAtot))
+if (dir.exists("/Users/marianepivard/Desktop/Protéomique Janvier 2022/")) {
+  write_xlsx(survie_uni_psm$coxph_ci,"/Users/marianepivard/Desktop/Protéomique Janvier 2022/survie_uni_psm.xlsx")
+}
+
+(survie_uni_hla <- uni_mod(prot_df_log_red$Hla, surv, d$CHAtot))
+if (dir.exists("/Users/marianepivard/Desktop/Protéomique Janvier 2022/")) {
+  write_xlsx(survie_uni_hla$coxph_ci,"/Users/marianepivard/Desktop/Protéomique Janvier 2022/survie_uni_hla.xlsx")
+}
+
+(survie_uni_PBP2A <- uni_mod(prot_df_log_red$PBP2A, surv, d$CHAtot))
+if (dir.exists("/Users/marianepivard/Desktop/Protéomique Janvier 2022/")) {
+  write_xlsx(survie_uni_PBP2A$coxph_ci,"/Users/marianepivard/Desktop/Protéomique Janvier 2022/survie_uni_PBP2A.xlsx")
+}
+
+(survie_uni_BlaZ <- uni_mod(prot_df_log_red$BlaZ, surv, d$CHAtot))
+if (dir.exists("/Users/marianepivard/Desktop/Protéomique Janvier 2022/")) {
+  write_xlsx(survie_uni_BlaZ$coxph_ci,"/Users/marianepivard/Desktop/Protéomique Janvier 2022/survie_uni_BlaZ.xlsx")
+}
+
+(survie_uni_ScpA <- uni_mod(prot_df_log_red$ScpA, surv, d$CHAtot))
+if (dir.exists("/Users/marianepivard/Desktop/Protéomique Janvier 2022/")) {
+  write_xlsx(survie_uni_ScpA$coxph_ci,"/Users/marianepivard/Desktop/Protéomique Janvier 2022/survie_uni_ScpA.xlsx")
+}
+
+(survie_uni_LukH <- uni_mod(prot_df_log_red$LukH, surv, d$CHAtot))
+if (dir.exists("/Users/marianepivard/Desktop/Protéomique Janvier 2022/")) {
+  write_xlsx(survie_uni_LukH$coxph_ci,"/Users/marianepivard/Desktop/Protéomique Janvier 2022/survie_uni_LukH.xlsx")
+}
+
+(survie_uni_hld <- uni_mod(prot_df_log_red$Hld, surv, d$CHAtot))
+if (dir.exists("/Users/marianepivard/Desktop/Protéomique Janvier 2022/")) {
+  write_xlsx(survie_uni_hld$coxph_ci,"/Users/marianepivard/Desktop/Protéomique Janvier 2022/survie_uni_hld.xlsx")
+}
+
+(survie_uni_EdinB <- uni_mod(prot_df_log_red$EdinB, surv, d$CHAtot))
+if (dir.exists("/Users/marianepivard/Desktop/Protéomique Janvier 2022/")) {
+  write_xlsx(survie_uni_EdinB$coxph_ci,"/Users/marianepivard/Desktop/Protéomique Janvier 2022/survie_uni_EdinB.xlsx")
+}
+
+(survie_uni_Fib <- uni_mod(prot_df_log_red$Fib, surv, d$CHAtot))
+if (dir.exists("/Users/marianepivard/Desktop/Protéomique Janvier 2022/")) {
+  write_xlsx(survie_uni_Fib$coxph_ci,"/Users/marianepivard/Desktop/Protéomique Janvier 2022/survie_uni_Fib.xlsx")
+}
+
+(survie_uni_SdrD <- uni_mod(prot_df_log_red$SdrD, surv, d$CHAtot))
+if (dir.exists("/Users/marianepivard/Desktop/Protéomique Janvier 2022/")) {
+  write_xlsx(survie_uni_SdrD$coxph_ci,"/Users/marianepivard/Desktop/Protéomique Janvier 2022/survie_uni_SdrD.xlsx")
+}
+
+(survie_uni_HlgA <- uni_mod(prot_df_log_red$HlgA, surv, d$CHAtot))
+if (dir.exists("/Users/marianepivard/Desktop/Protéomique Janvier 2022/")) {
+  write_xlsx(survie_uni_HlgA$coxph_ci,"/Users/marianepivard/Desktop/Protéomique Janvier 2022/survie_uni_HlgA.xlsx")
+}
+```
+
+## Survival analysis with multivariate approach:
+
+```{r}
+(mod5 <- coxph(surv ~ d$CHAtot + ., prot_df_log_red))
+(multi_survie <-as.data.frame(summary(mod5)$coefficients))
+(IC_multi_survie <- rownames_to_column(as.data.frame(exp(confint(mod5))), var = "rowname"))
+
+if (dir.exists("/Users/marianepivard/Desktop/Protéomique Janvier 2022/")) {
+  write_xlsx(multi_survie,"/Users/marianepivard/Desktop/Protéomique Janvier 2022/multi_survie.xlsx")
+}
+
+if (dir.exists("/Users/marianepivard/Desktop/Protéomique Janvier 2022/")) {
+  write_xlsx(IC_multi_survie,"/Users/marianepivard/Desktop/Protéomique Janvier 2022/IC_multi_survie.xlsx")
+}
+
+
+```
+
+## Survival analysis with multivariate-groups approach:
+
+
+```{r}
+# Extract coeffs and variance
+M5 <- mod5$coefficients
+V5 <- vcov(mod5)
+
+Mgroup5 <- Vgroup5 <- rep(NA, length(unique(groupnames$group)))
+names(Mgroup5) <- names(Vgroup5) <- unique(groupnames$group)
+
+for(current_group in unique(groupnames$group)) {
+  names <- groupnames[ group == current_group, ]$name
+  Mgroup5[current_group] <- sum(M5[ names ])
+  Vgroup5[current_group] <- sum(V5[ names, names ])
+}
+
+Mgroup5
+Vgroup5
+
+groupcoef5 <- data.table(
+  group = names(Mgroup5), 
+  coef = Mgroup5,
+  sd = sqrt(Vgroup5), 
+  Z = Mgroup5 / sqrt(Vgroup5), 
+  exp_coef = exp(Mgroup5),
+  CI_L = exp(Mgroup5 - 1.96 * sqrt(Vgroup5)),
+  CI_U = exp(Mgroup5 + 1.96 * sqrt(Vgroup5))
+)
+
+(group_survie <- as.data.frame(groupcoef5))
+if (dir.exists("/Users/marianepivard/Desktop/Protéomique Janvier 2022/")) {
+  write_xlsx(group_survie,"/Users/marianepivard/Desktop/Protéomique Janvier 2022/group_survie.xlsx")
+}
+```
+
+# LUKS correlation with proteins from univariate analysis with death:
+
+```{r}
+for (name in c("ScpA", "Hla", "Hld", "Fib", "BlaZ", "LukH", "SdrD", "PBP2A", "PSMa4", "EdinB", "Spa")) {
+  cor_test_filtered(as.data.frame(prot), name, "LukS")
+}
+```
+
+
+# Session info:
+
+```{r}
+sessionInfo()
+```
+
