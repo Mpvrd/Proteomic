@@ -1,0 +1,178 @@
+##############################
+##      PHRC Functions      ##
+##############################
+
+#Import packages + install if not found
+list.of.packages <- c("data.table","ggplot2","RColorBrewer","dplyr","magrittr","ggpubr","cowplot",
+                      "ade4","FactoMineR","factoextra","writexl","ade4","grid","gridExtra","lme4",
+                      "markdown","rmarkdown","purrr","tidyverse","broom","corrplot","survival")
+
+new.packages <- list.of.packages[!(list.of.packages %in% installed.packages()[,"Package"])]
+
+if(length(new.packages)) install.packages(new.packages)
+lapply(list.of.packages, require, character.only = T)
+
+# Univariate analysis 
+uni_ana_binomial <- function(x, y, x_control){
+  result <- t(apply(x, 2, function(each_of_x) {
+    coef(summary(glm(y ~ each_of_x + x_control, family = "binomial")))[2, ]
+  }))
+  res_final <- as.data.frame(result[order(result[, 4]),])
+  res_final <- rownames_to_column(res_final, var = "rowname")
+  return(res_final)
+}
+
+# Multivariate analysis
+multi_ana_binomial <- function(x, y, x_control){
+  x_variables <- as.matrix(cbind(x, x_control))
+  results <- list()
+  result <- coef(summary(glm(y ~ x_variables, family = "binomial")))
+  rownames(result)[2:length(rownames(result))] <- c(names(x), "CHAtot")
+  results$res_order_col_four <- as.data.frame(result[order(result[, 4]), ])
+  results$res_order_col_four <- rownames_to_column(results$res_order_col_four, var = "rowname")
+  results$res_order_col_one <- as.data.frame(result[order(result[, 1]), ])
+  results$res_order_col_one <- rownames_to_column(results$res_order_col_one, var = "rowname")
+  return(results)
+}
+
+# Multivariate analysis multiple controls
+multi_ana_binomial_multi_ctrl <- function(x, y, x_control){
+  x_variables <- as.matrix(cbind(x, x_control))
+  results <- list()
+  result <- coef(summary(glm(y ~ x_variables, family = "binomial")))
+  rownames(result)[2:length(rownames(result))] <- c(names(x), names(x_control))
+  results$res_order_col_four <- as.data.frame(result[order(result[, 4]), ])
+  results$res_order_col_four <- rownames_to_column(results$res_order_col_four, var = "rowname")
+  results$res_order_col_one <- as.data.frame(result[order(result[, 1]), ])
+  results$res_order_col_one <- rownames_to_column(results$res_order_col_one, var = "rowname")
+  return(results)
+}
+
+# Multivariate analysis using subgroups
+multi_ana_subgroups_binomial <- function(x, y, x_control, groupnames){
+  results <- list()
+  
+  x_variables <- as.matrix(cbind(x, x_control))
+  mod <- (glm(y ~ x_variables, family = "binomial"))
+  names(mod$coefficients)[2:length(names(mod$coefficients))] <- c(names(x), "CHAtot")
+  
+  # Extract coeffs and variance
+  M <- mod$coefficients
+  V <- vcov(mod)
+  
+  Mgroup <- Vgroup <- rep(NA, length(unique(groupnames$group)))
+  names(Mgroup) <- names(Vgroup) <- unique(groupnames$group)
+  
+  for(current_group in unique(groupnames$group)) {
+    names <- groupnames[ group == current_group, ]$name
+    Mgroup[current_group] <- sum(M[ names ])
+    Vgroup[current_group] <- sum(V[ names, names ])
+  }
+  
+  results$Mgroup <- Mgroup
+  results$Vgroup <- Vgroup
+  
+  groupcoef <- data.table(group =
+                            names(Mgroup), coef = Mgroup,
+                          sd = sqrt(Vgroup), Z = Mgroup / sqrt(Vgroup), exp_coef = exp(Mgroup),
+                          CI_L = exp(Mgroup - 1.96 * sqrt(Vgroup)), CI_U = exp(Mgroup + 1.96 * sqrt(Vgroup))
+  )
+  
+  results$groupcoef <- as.data.frame(groupcoef)
+  return(results)
+}
+
+# Survival analysis
+uni_mod <- function(x, y, x_control){
+  results <- list()
+  results$coxph <- coxph(y ~ x + x_control)
+  results$coxph_ci <- rownames_to_column(as.data.frame(exp(confint(results$coxph))), var = "rowname")
+  return(results)
+}
+
+# Correlation analysis
+cor_test_filtered <- function(data, x, y){
+  x_col_idx <- which( colnames(data) == x )
+  y_col_idx <- which( colnames(data) == y )
+  dd <- data %>% filter(data[, y_col_idx] > 0)
+  res_cor <- cor.test(dd[, x_col_idx], dd[, y_col_idx], method = "pearson")
+  res_cor$data.name <- paste(x, "and", y, sep = " ")
+  print(res_cor)
+}
+
+# Odds ratio plot
+create.odds.visu <- function(data, names_for_reorder) {
+  boxOdds <- data[, 2]
+  SEod <- data[, 3] * 1.96
+  boxCIHigh <- boxOdds + SEod
+  boxCILow <- boxOdds - SEod
+  #Remove binomial glm logit effect with exp()
+  df <- exp(data.frame(boxOdds, boxCILow, boxCIHigh))
+  rownames(df) <- data[, 1]
+  print(df)
+  df_reorder <- df[match(names_for_reorder, rownames(df)),]
+  print(df_reorder)
+  min_x <- floor(min(df$boxCILow))
+  if (min_x == 0) {min_x <- -1}
+  print(min_x)
+  max_x <- ceiling(max(df$boxCIHigh))
+  breaks_val <- 0.5
+  if (max_x >= 6) {breaks_val <- 1}
+  if (max_x >= 10) {breaks_val <- 2}
+  print(max_x)
+  (P4 <- ggplot(data = df_reorder,
+      mapping = aes(y = forcats::fct_inorder(f = names_for_reorder))) +
+      geom_point(mapping = aes(x = boxOdds), size = 3, color = "orange") +
+      geom_errorbarh(aes(xmax = boxCIHigh, xmin = boxCILow),
+        size = .5, height = .3, color = "gray50") +
+      geom_vline(aes(xintercept = 1), size = .25, linetype = "dashed") +
+      scale_x_continuous(trans = 'log10', breaks = seq(min_x, max_x, breaks_val),
+      #scale_x_continuous(breaks = seq(min_x, max_x, breaks_val),
+        labels = seq(min_x, max_x, breaks_val), limits = c(min_x, max_x)) +
+      theme_bw() + theme(panel.grid.minor = element_blank(), 
+        axis.text.x = element_text(size=6.5)) +
+      ylab("") + xlab("Odds ratio (log scale)"))
+}
+
+# Odds ratio plot without Y labs
+create.odds.visu2 <- function(data, names_for_reorder) {
+  boxOdds <- data[, 2]
+  SEod <- data[, 3] * 1.96
+  boxCIHigh <- boxOdds + SEod
+  boxCILow <- boxOdds - SEod
+  #Remove binomial glm logit effect with exp()
+  df <- exp(data.frame(boxOdds, boxCILow, boxCIHigh))
+  rownames(df) <- data[, 1]
+  print(df)
+  df_reorder <- df[match(names_for_reorder, rownames(df)),]
+  print(df_reorder)
+  min_x <- floor(min(df$boxCILow))
+  if (min_x == 0) {min_x <- -1}
+  print(min_x)
+  max_x <- ceiling(max(df$boxCIHigh))
+  breaks_val <- 0.5
+  if (max_x >= 6) {breaks_val <- 1}
+  print(max_x)
+  (P4 <- ggplot(data = df_reorder,
+                mapping = aes(y = forcats::fct_inorder(f = names_for_reorder))) +
+      geom_point(mapping = aes(x = boxOdds), size = 3, color = "orange") +
+      geom_errorbarh(aes(xmax = boxCIHigh, xmin = boxCILow),
+                     size = .5, height = .3, color = "gray50") +
+      geom_vline(aes(xintercept = 1), size = .25, linetype = "dashed") +
+      scale_x_continuous(trans = 'log10', breaks = seq(min_x, max_x, breaks_val),
+                         #scale_x_continuous(breaks = seq(min_x, max_x, breaks_val),
+                         labels = seq(min_x, max_x, breaks_val), limits = c(min_x, max_x)) +
+      theme_bw() + theme(panel.grid.minor = element_blank(), 
+                         axis.text.x = element_text(size=6.5), 
+                         axis.text.y=element_blank(), axis.ticks.y=element_blank(),
+                         plot.margin = margin(t = 0, r = 0, b = 0, l = 0, unit = "pt")) +
+      ylab("") + xlab("Odds ratio (log scale)"))
+}
+
+# Save plot
+save.plot <- function(cmd, nameimg) {
+  png(paste(nameimg ,"png", sep = "."), width = 20, height = 12,
+      units = "cm", res = 600, pointsize = 4)
+  plot(cmd, lwd = 0.5, las = 3, xlab = "", cex.axis = 0.5)
+  dev.off()
+}
